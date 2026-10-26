@@ -201,6 +201,10 @@ class TestRecordAudioSileroPath(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"pyaudio": pyaudio_mod, "numpy": np}),
             patch(
+                "vocalinux.speech_recognition.recognition_manager._open_capture_stream",
+                return_value=(channels, rate, stream),
+            ),
+            patch(
                 "vocalinux.speech_recognition.recognition_manager._get_supported_channels",
                 return_value=channels,
             ),
@@ -270,6 +274,10 @@ class TestRecordAudioSileroPath(unittest.TestCase):
         """CHANNELS=2 -> the stereo->mono branch runs and the loop completes."""
         self._drive(probs=[0.05] * 12, vad_sensitivity=3, channels=2, chunk_bytes=1024 * 2 * 2)
         # No assertion on enqueue count -- just verify the path runs cleanly.
+
+    def test_quad_capture_is_downmixed_without_error(self):
+        """CHANNELS=4 -> native 4ch frames are averaged to mono."""
+        self._drive(probs=[0.05] * 12, vad_sensitivity=3, channels=4, chunk_bytes=1024 * 2 * 4)
 
     def test_resample_branch_runs_at_48khz(self):
         """rate=48000 -> the resample branch in _record_audio runs."""

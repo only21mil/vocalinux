@@ -518,10 +518,10 @@ def _open_capture_stream(audio, device_index: Optional[int] = None) -> tuple[int
     heap corruption (see GitHub issue #567).
 
     This function opens PortAudio exactly once per capture session: candidate
-    formats are tried in order (device default rate first, mono before stereo,
-    stereo skipped entirely for mono-only devices) and the FIRST successfully
-    opened stream is returned to the caller for actual capture — never closed
-    and reopened.
+    formats are tried in order (device default rate first, native channel
+    count before converted layouts, extra channels skipped for mono-only
+    devices) and the FIRST successfully opened stream is returned to the
+    caller for actual capture — never closed and reopened.
 
     Args:
         audio: PyAudio instance
@@ -550,18 +550,24 @@ def _open_capture_stream(audio, device_index: Optional[int] = None) -> tuple[int
         if rate not in rates_to_try:
             rates_to_try.append(rate)
 
-    # Never probe stereo on a device that reports a single input channel
-    # (opening with more channels than supported is itself a known
-    # PortAudio/ALSA corruption trigger). Stereo-capable devices must be
-    # opened at their native layout first: Intel SOF DMICs (Raptor Lake
-    # "Digital Microphone", etc.) often only support 2ch at the PCM, and
-    # PortAudio can abort with heap corruption if open() accepts a converted
-    # 1ch stream and the callback then overruns (#666).
+    # Never probe more channels than the device reports (opening with more
+    # than the PCM supports is itself a known PortAudio/ALSA corruption
+    # trigger). Native layout first: Intel SOF DMICs abort with heap
+    # corruption if PortAudio accepts a converted fewer-channel stream and
+    # the first read then overruns (#666). Raptor Lake DMICs report 2ch;
+    # Lunar Lake / Core Ultra Series 3 DMICs report 4ch. Pulse "default"
+    # often claims 32ch — treat that as a virtual max and keep stereo-first.
     reported_channels = int(device_info.get("maxInputChannels", 0) or 0)
+    native_channel_cap = 8
     if reported_channels == 1:
         channel_options = [1]
-    elif reported_channels >= 2:
+    elif reported_channels > native_channel_cap:
         channel_options = [2, 1]
+    elif reported_channels >= 2:
+        channel_options = []
+        for candidate in (reported_channels, 2, 1):
+            if candidate not in channel_options:
+                channel_options.append(candidate)
     else:
         channel_options = [1, 2]
 
@@ -613,7 +619,7 @@ def _get_supported_channels(audio, device_index: Optional[int] = None) -> int:
         device_index: The device index to test (None for default)
 
     Returns:
-        int: Number of channels supported (1 or 2), defaults to 1
+        int: Negotiated channel count (native layout, else 1), defaults to 1
     """
     channels, _rate, stream = _open_capture_stream(audio, device_index)
     _safe_close_stream(stream)
@@ -3307,13 +3313,12 @@ class SpeechRecognitionManager:
 
                         data = stream.read(CHUNK, exception_on_overflow=False)
 
-                        # Convert stereo to mono if necessary
-                        # Speech recognition engines expect mono (1 channel) audio
-                        if CHANNELS == 2:
+                        # Speech engines expect mono. Average any native
+                        # multi-channel frame (2ch SOF DMICs, 4ch Lunar Lake).
+                        if CHANNELS > 1:
                             audio_array = np.frombuffer(data, dtype=np.int16)
-                            # Reshape to (n_samples, 2) and average channels
-                            stereo_samples = audio_array.reshape(-1, 2)
-                            mono_samples = stereo_samples.mean(axis=1).astype(np.int16)
+                            multi_samples = audio_array.reshape(-1, CHANNELS)
+                            mono_samples = multi_samples.mean(axis=1).astype(np.int16)
                             data = mono_samples.tobytes()
 
                         # Resample to 16kHz if capturing at non-16kHz for Vosk/Whisper compatibility

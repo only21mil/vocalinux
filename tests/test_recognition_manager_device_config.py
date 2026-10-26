@@ -360,6 +360,52 @@ class TestAudioDeviceDetection(unittest.TestCase):
         assert mock_audio.open.call_count == 1
         assert mock_audio.open.call_args.kwargs.get("channels") == 2
 
+    def test_open_capture_stream_quad_device_prefers_native_channels(self):
+        """4ch SOF DMICs must be opened 4ch-first, not converted stereo (#666).
+
+        Lunar Lake / Core Ultra Series 3 digital mics report
+        maxInputChannels=4. Opening them as 2ch or 1ch can succeed then
+        abort on the first read with ``free(): corrupted unsorted chunks``.
+        """
+        mock_audio = MagicMock()
+        mock_stream = MagicMock()
+        mock_audio.open.return_value = mock_stream
+        mock_audio.get_device_info_by_index.return_value = {
+            "name": "Core Ultra Processors (Series 3) HD Audio Digital Microphone",
+            "defaultSampleRate": 48000,
+            "maxInputChannels": 4,
+        }
+        mock_pyaudio = MagicMock(paInt16=8)
+
+        with patch.dict("sys.modules", {"pyaudio": mock_pyaudio}):
+            channels, rate, stream = _open_capture_stream(mock_audio, 12)
+
+        assert channels == 4
+        assert rate == 48000
+        assert stream is mock_stream
+        assert mock_audio.open.call_count == 1
+        assert mock_audio.open.call_args.kwargs.get("channels") == 4
+
+    def test_open_capture_stream_high_channel_virtual_device_stays_stereo(self):
+        """Pulse 'default' reports 32ch; do not open that many inputs."""
+        mock_audio = MagicMock()
+        mock_stream = MagicMock()
+        mock_audio.open.return_value = mock_stream
+        mock_audio.get_device_info_by_index.return_value = {
+            "name": "default",
+            "defaultSampleRate": 48000,
+            "maxInputChannels": 32,
+        }
+        mock_pyaudio = MagicMock(paInt16=8)
+
+        with patch.dict("sys.modules", {"pyaudio": mock_pyaudio}):
+            channels, rate, stream = _open_capture_stream(mock_audio, 3)
+
+        assert channels == 2
+        assert rate == 48000
+        assert stream is mock_stream
+        assert mock_audio.open.call_args.kwargs.get("channels") == 2
+
     def test_open_capture_stream_stereo_device_falls_back_to_mono(self):
         """If native stereo open fails, still try mono on a 2ch-reporting device."""
         mock_audio = MagicMock()
